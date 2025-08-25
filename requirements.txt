@@ -1,0 +1,4 @@
+Pillow==11.3.0
+qrcode==8.2
+brother_ql==0.9.4
+pycups==2.0.4
