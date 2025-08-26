@@ -1,5 +1,5 @@
 from PySide6.QtCore import QRectF, QPointF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPen, QFont, QImage, QPixmap
+from PySide6.QtGui import QBrush, QColor, QPen, QFont, QImage, QPixmap, QTextOption
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QGraphicsPixmapItem
 import qrcode
 import io
@@ -31,11 +31,33 @@ class TextItem(QGraphicsTextItem):
 		f = QFont('Arial', 18)
 		self.setFont(f)
 		self.setDefaultTextColor(Qt.black)
+		# Ensure wrapping is enabled so setTextWidth acts as max width
+		opt = self.document().defaultTextOption()
+		opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+		self.document().setDefaultTextOption(opt)
 
 	def set_font(self, family: str, size_pt: int, bold: bool):
 		f = QFont(family, size_pt)
 		f.setBold(bool(bold))
 		self.setFont(f)
+
+	def set_alignment(self, align: str):
+		opt = self.document().defaultTextOption()
+		if align.lower() == 'center':
+			opt.setAlignment(Qt.AlignHCenter)
+		elif align.lower() == 'right':
+			opt.setAlignment(Qt.AlignRight)
+		else:
+			opt.setAlignment(Qt.AlignLeft)
+		self.document().setDefaultTextOption(opt)
+
+	def get_alignment(self) -> str:
+		al = self.document().defaultTextOption().alignment()
+		if al & Qt.AlignHCenter:
+			return 'Center'
+		if al & Qt.AlignRight:
+			return 'Right'
+		return 'Left'
 
 	def itemChange(self, change, value):
 		if change == QGraphicsItem.ItemPositionChange and self.scene_ref.snap_enabled:

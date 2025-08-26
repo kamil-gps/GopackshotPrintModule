@@ -15,12 +15,25 @@ def render_scene_to_png(scene, out_path: str, dpi: int = 300) -> str:
 	px_h = int(label_rect.height() / scene.pixels_per_mm * (dpi / 25.4))
 	img = QImage(px_w, px_h, QImage.Format_Grayscale8)
 	img.fill(255)
+	# Temporarily disable grid for print output
+	prev_grid = getattr(scene, 'grid_enabled', None)
+	if prev_grid is not None:
+		try:
+			scene.set_grid(False)
+		except Exception:
+			pass
 	# Render scene portion directly; Qt 6 signature is render(painter, target, source, aspectRatioMode)
 	from PySide6.QtGui import QPainter
 	p = QPainter(img)
 	p.setRenderHint(QPainter.Antialiasing)
 	scene.render(p, QRectF(0, 0, px_w, px_h), label_rect, Qt.KeepAspectRatio)
 	p.end()
+	# Restore grid state
+	if prev_grid is not None:
+		try:
+			scene.set_grid(prev_grid)
+		except Exception:
+			pass
 	img.save(out_path)
 	return out_path
 

@@ -28,9 +28,31 @@ def serialize_scene(scene) -> Dict[str, Any]:
 		# Items are returned in Z-order; we only care about types with element_id
 		if hasattr(it, 'element_id'):
 			elt: Dict[str, Any] = {"id": it.element_id, **rect_mm(it)}
+			# Persist optional user-defined name and rotation
+			name = getattr(it, 'user_name', '')
+			if name:
+				elt["name"] = name
+			rot = int(round(getattr(it, 'rotation', lambda: 0)() if callable(getattr(it, 'rotation', None)) else getattr(it, 'rotation', 0)))
+			if rot:
+				elt["rotation"] = rot
 			if it.__class__.__name__ == 'TextItem':
 				fam = it.font().family(); size_pt = it.font().pointSize(); bold = it.font().bold()
-				elt.update({"type": "text", "text": it.toPlainText(), "font": {"family": fam, "size": size_pt, "bold": bold}})
+				align = None
+				try:
+					align = it.get_alignment()
+				except Exception:
+					align = None
+				# detect max width from textWidth if set
+				try:
+					max_w_px = it.textWidth()
+				except Exception:
+					max_w_px = 0
+				payload = {"type": "text", "text": it.toPlainText(), "font": {"family": fam, "size": size_pt, "bold": bold}}
+				if align:
+					payload["align"] = align
+				if max_w_px and max_w_px > 0:
+					payload["maxWidthMm"] = round(max_w_px / ppm, 2)
+				elt.update(payload)
 			elif it.__class__.__name__ == 'BarcodeItem':
 				elt.update({"type": "barcode", "data": it.data, "symbology": it.symbology,
 							  "targetWmm": it.target_w_mm, "targetHmm": it.target_h_mm})
@@ -95,18 +117,46 @@ def deserialize_scene(scene, data: Dict[str, Any]) -> None:
 				item.set_font(fam, size_pt, bold)
 			except Exception:
 				pass
+			# alignment
+			if 'align' in elt:
+				try:
+					item.set_alignment(elt['align'])
+				except Exception:
+					pass
+			# max width wrap
+			if 'maxWidthMm' in elt:
+				try:
+					item.setTextWidth(float(elt['maxWidthMm']) * scene.pixels_per_mm)
+				except Exception:
+					pass
+			# restore name and rotation
+			if 'name' in elt:
+				setattr(item, 'user_name', elt['name'])
+			if 'rotation' in elt:
+				try: item.setRotation(float(elt['rotation']))
+				except Exception: pass
 		elif etype == 'barcode':
 			item = scene.add_barcode_with_id(id_, elt.get('data', ''), elt.get('symbology', 'code128'))
 			item.setPos(x, y)
 			if 'targetWmm' in elt: item.target_w_mm = float(elt['targetWmm'])
 			if 'targetHmm' in elt: item.target_h_mm = float(elt['targetHmm'])
 			item._render()
+			if 'name' in elt:
+				setattr(item, 'user_name', elt['name'])
+			if 'rotation' in elt:
+				try: item.setRotation(float(elt['rotation']))
+				except Exception: pass
 		elif etype == 'qr':
 			item = scene.add_qr_with_id(id_, elt.get('data', ''))
 			item.setPos(x, y)
 			if 'targetWmm' in elt: item.target_w_mm = float(elt['targetWmm'])
 			if 'targetHmm' in elt: item.target_h_mm = float(elt['targetHmm'])
 			item._render()
+			if 'name' in elt:
+				setattr(item, 'user_name', elt['name'])
+			if 'rotation' in elt:
+				try: item.setRotation(float(elt['rotation']))
+				except Exception: pass
 
 	# Reset counters based on loaded IDs
 	ids = [e.get('id', '') for e in data.get('elements', [])]

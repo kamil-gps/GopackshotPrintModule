@@ -2,15 +2,68 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTabWidget, QListWidget, QPushButton, QToolBar, QLabel, QStatusBar,
     QFormLayout, QDoubleSpinBox, QCheckBox, QComboBox, QLineEdit, QTableWidget,
-    QTableWidgetItem
+    QTableWidgetItem, QAbstractItemView, QSpinBox, QFileDialog
 )
-from PySide6.QtCore import Qt, QSize, QMimeData
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont as QFontGui
+from PySide6.QtCore import Qt, QSize, QMimeData, QSettings
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont as QFontGui, QKeySequence
 from .canvas import CanvasView
 from .template import save_template_file, load_template_file
 from .print_service import render_scene_to_png, cups_print_png
 import os
 import glob
+
+
+class CsvTable(QTableWidget):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+		self.setSelectionBehavior(QAbstractItemView.SelectItems)
+
+	def keyPressEvent(self, event):
+		if event.matches(QKeySequence.Copy):
+			self._copy_selection()
+			return
+		if event.matches(QKeySequence.Paste):
+			self._paste_from_clipboard()
+			return
+		super().keyPressEvent(event)
+
+	def _copy_selection(self):
+		ranges = self.selectedRanges()
+		if not ranges:
+			return
+		r = ranges[0]
+		rows = []
+		for i in range(r.topRow(), r.bottomRow() + 1):
+			cells = []
+			for j in range(r.leftColumn(), r.rightColumn() + 1):
+				it = self.item(i, j)
+				cells.append((it.text() if it else ''))
+			rows.append('\t'.join(cells))
+		QApplication.clipboard().setText('\n'.join(rows))
+
+	def _paste_from_clipboard(self):
+		text = QApplication.clipboard().text()
+		if not text:
+			return
+		start = self.currentIndex()
+		row0 = start.row() if start.isValid() else max(0, self.rowCount() - 1)
+		col0 = start.column() if start.isValid() else 0
+		lines = [ln for ln in text.splitlines() if ln is not None]
+		for dy, ln in enumerate(lines):
+			# Support tab or comma separated
+			vals = ln.split('\t') if ('\t' in ln) else ln.split(',')
+			r = row0 + dy
+			while r >= self.rowCount():
+				self.insertRow(self.rowCount())
+			for dx, val in enumerate(vals):
+				c = col0 + dx
+				if c >= self.columnCount():
+					break
+				if not self.item(r, c):
+					self.setItem(r, c, QTableWidgetItem(val))
+				else:
+					self.item(r, c).setText(val)
 
 
 class LeftTabs(QWidget):
@@ -23,7 +76,7 @@ class LeftTabs(QWidget):
 		# CSV tab
 		csv_tab = QWidget(); lcsv = QVBoxLayout(csv_tab)
 		self.csv_build = QPushButton('Build CSV structure from Elements')
-		self.csv_table = QTableWidget(0, 0)
+		self.csv_table = CsvTable(0, 0)
 		row_btns = QHBoxLayout()
 		self.csv_add_row = QPushButton('Add Row')
 		self.csv_del_row = QPushButton('Remove Row')
@@ -54,8 +107,15 @@ class LeftTabs(QWidget):
 		# Elements tab
 		t_fields = QWidget()
 		lf = QVBoxLayout(t_fields)
-		self.elements_list = QListWidget()
+		self.elements_list = QListWidget(); self.elements_list.setSelectionMode(QAbstractItemView.SingleSelection); self.elements_list.setStyleSheet('QListWidget { color: white; }')
 		lf.addWidget(self.elements_list)
+		# Rename + order controls
+		rename_row = QHBoxLayout()
+		self.rename_input = QLineEdit(); self.rename_btn = QPushButton('Rename')
+		self.move_up_btn = QPushButton('Move Up'); self.move_down_btn = QPushButton('Move Down')
+		rename_row.addWidget(self.rename_input); rename_row.addWidget(self.rename_btn)
+		rename_row.addWidget(self.move_up_btn); rename_row.addWidget(self.move_down_btn)
+		lf.addLayout(rename_row)
 		# Saved templates section
 		lf.addWidget(QLabel('Template name'))
 		self.template_name = QLineEdit()
@@ -63,6 +123,17 @@ class LeftTabs(QWidget):
 		self.saved_list = QListWidget()
 		lf.addWidget(QLabel('Saved Templates'))
 		lf.addWidget(self.saved_list)
+		# Elements save/load/refresh buttons (moved inside Elements tab)
+		el_btn_row = QHBoxLayout()
+		self.btn_save = QPushButton('Save Elements')
+		self.btn_load = QPushButton('Load Elements')
+		self.btn_refresh = QPushButton('Refresh')
+		el_btn_row.addWidget(self.btn_save)
+		el_btn_row.addWidget(self.btn_load)
+		el_btn_row.addWidget(self.btn_refresh)
+		lf.addLayout(el_btn_row)
+		self.choose_templates_btn = QPushButton('Choose Templates Folder…')
+		lf.addWidget(self.choose_templates_btn)
 		self.tabs.addTab(t_fields, 'Elements')
 		# Printer/Media tab
 		t_media = QWidget()
@@ -78,17 +149,9 @@ class LeftTabs(QWidget):
 		fm.addRow('', snap)
 		self.tabs.addTab(t_media, 'Printer/Media')
 
-		# Save/Load Template buttons
-		btn_row = QHBoxLayout()
-		self.btn_save = QPushButton('Save Template')
-		self.btn_load = QPushButton('Load Selected')
-		self.btn_refresh = QPushButton('Refresh')
-		btn_row.addWidget(self.btn_save)
-		btn_row.addWidget(self.btn_load)
-		btn_row.addWidget(self.btn_refresh)
+		# Root layout for LeftTabs
 		lay = QVBoxLayout(self)
 		lay.addWidget(self.tabs)
-		lay.addLayout(btn_row)
 
 
 class DesignToolbar(QToolBar):
@@ -127,22 +190,27 @@ class InspectorPane(QWidget):
 		super().__init__()
 		self._guard = False
 		form = QFormLayout(self)
-		self.x = QDoubleSpinBox(); self.x.setRange(0, 100); self.x.setDecimals(1)
-		self.y = QDoubleSpinBox(); self.y.setRange(0, 100); self.y.setDecimals(1)
-		self.w = QDoubleSpinBox(); self.w.setRange(0, 100); self.w.setDecimals(1)
-		self.h = QDoubleSpinBox(); self.h.setRange(0, 100); self.h.setDecimals(1)
+		self.x = QSpinBox(); self.x.setRange(0, 100)
+		self.y = QSpinBox(); self.y.setRange(0, 100)
+		self.w = QSpinBox(); self.w.setRange(0, 100)
+		self.h = QSpinBox(); self.h.setRange(0, 100)
 		form.addRow('X (mm)', self.x)
 		form.addRow('Y (mm)', self.y)
 		form.addRow('Width (mm)', self.w)
 		form.addRow('Height (mm)', self.h)
-		self.font = QComboBox(); self.font.addItems(['Arial', 'Helvetica', 'Noto Sans'])
+		self.font = QComboBox(); self.font.addItems(['Arial', 'Helvetica', 'Courier', 'Courier New', 'Noto Sans'])
 		form.addRow('Font', self.font)
-		self.font_size = QDoubleSpinBox(); self.font_size.setRange(6, 96); self.font_size.setValue(18)
+		self.font_size = QSpinBox(); self.font_size.setRange(6, 96); self.font_size.setValue(18)
 		form.addRow('Font Size', self.font_size)
 		self.font_bold = QCheckBox('Bold')
 		form.addRow('', self.font_bold)
+		self.align = QComboBox(); self.align.addItems(['Left', 'Center', 'Right'])
+		form.addRow('Alignment', self.align)
 		self.text_input = QLineEdit(); form.addRow('Text', self.text_input)
 		self.code_input = QLineEdit(); form.addRow('Code Data', self.code_input)
+		# Rotate button in inspector
+		self.btn_rotate = QPushButton('Rotate 90°')
+		form.addRow('', self.btn_rotate)
 
 	def set_values(self, x: float, y: float, w: float, h: float):
 		self._guard = True
@@ -179,12 +247,6 @@ class MainWindow(QMainWindow):
 		self.toolbar.act_fit.triggered.connect(self.canvas.fit_label)
 		self.toolbar.act_grid.triggered.connect(self.canvas.toggle_grid)
 		self.toolbar.act_snap.triggered.connect(self.canvas.toggle_snap)
-
-		# Update left elements list when items are added
-		self.canvas.scene_obj.element_added.connect(self._on_element_added)
-		self.left.btn_save.clicked.connect(self._save_template)
-		self.left.btn_load.clicked.connect(self._load_template)
-		self.left.btn_refresh.clicked.connect(self._refresh_saved)
 		self.toolbar.act_print.triggered.connect(self._print_current)
 		self.canvas.scene_obj.selection_changed.connect(self._sync_inspector)
 		self.inspector.x.valueChanged.connect(self._apply_inspector)
@@ -194,12 +256,20 @@ class MainWindow(QMainWindow):
 		self.inspector.font.currentTextChanged.connect(self._apply_font)
 		self.inspector.font_size.valueChanged.connect(self._apply_font)
 		self.inspector.font_bold.stateChanged.connect(self._apply_font)
+		self.inspector.align.currentTextChanged.connect(self._apply_alignment)
 		self.inspector.text_input.editingFinished.connect(self._apply_text)
 		self.inspector.code_input.editingFinished.connect(self._apply_code)
+		self.inspector.btn_rotate.clicked.connect(self._rotate_selected)
 		self.left.elements_list.currentRowChanged.connect(lambda _: self._select_from_list())
 		self.left.saved_list.itemDoubleClicked.connect(lambda _: self._load_template())
-
-		self._ensure_templates_dir(); self._refresh_saved()
+		self.left.btn_save.clicked.connect(self._save_template)
+		self.left.btn_load.clicked.connect(self._load_template)
+		self.left.btn_refresh.clicked.connect(self._refresh_saved)
+		self.left.choose_templates_btn.clicked.connect(self._choose_templates_dir)
+		self.left.rename_btn.clicked.connect(self._rename_element)
+		self.left.move_up_btn.clicked.connect(lambda: self._reorder_selected(-1))
+		self.left.move_down_btn.clicked.connect(lambda: self._reorder_selected(1))
+		self._load_templates_dir_from_settings(); self._ensure_templates_dir(); self._refresh_saved()
 		# CSV dir
 		self._ensure_csv_dir(); self._refresh_csv()
 		# CSV wiring
@@ -210,9 +280,30 @@ class MainWindow(QMainWindow):
 		self.left.csv_refresh.clicked.connect(self._refresh_csv)
 		self.left.csv_load.clicked.connect(self._csv_load)
 		self.left.csv_print_all.clicked.connect(self._csv_print_all)
+		self.left.csv_table.verticalHeader().sectionClicked.connect(self._csv_preview_row)
+
+	def _load_templates_dir_from_settings(self):
+		settings = QSettings('Gopackshot', 'ImageFlowPrint')
+		path = settings.value('templates_dir', '', type=str)
+		if path and os.path.isdir(path):
+			self._templates_dir_path = path
+		else:
+			base = os.path.dirname(os.path.abspath(__file__))
+			self._templates_dir_path = os.path.abspath(os.path.join(base, '..', '..', 'Templates'))
 
 	def _templates_dir(self):
-		return os.path.expanduser('~/GopackshotTemplates')
+		return self._templates_dir_path
+
+	def _app_root(self):
+		return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+
+	def _runtime_dir(self):
+		path = os.path.join(self._app_root(), 'runtime')
+		os.makedirs(path, exist_ok=True)
+		return path
+
+	def _runtime_file(self, name: str) -> str:
+		return os.path.join(self._runtime_dir(), name)
 
 	def _csv_dir(self):
 		return os.path.join(self._templates_dir(), 'csv')
@@ -228,6 +319,13 @@ class MainWindow(QMainWindow):
 		for p in sorted(glob.glob(os.path.join(self._templates_dir(), '*.json'))):
 			self.left.saved_list.addItem(p)
 
+	def _choose_templates_dir(self):
+		path = QFileDialog.getExistingDirectory(self, 'Choose Templates Folder', self._templates_dir())
+		if path:
+			self._templates_dir_path = path
+			QSettings('Gopackshot', 'ImageFlowPrint').setValue('templates_dir', path)
+			self._ensure_templates_dir(); self._refresh_saved(); self._ensure_csv_dir(); self._refresh_csv()
+
 	def _refresh_csv(self):
 		self.left.csv_saved_list.clear()
 		for p in sorted(glob.glob(os.path.join(self._csv_dir(), '*.csv'))):
@@ -235,13 +333,15 @@ class MainWindow(QMainWindow):
 
 	def _add_text(self):
 		item = self.canvas.add_text('Sample Text')
-		# rely on element_added signal to populate list
+		self._on_element_added(getattr(item, 'element_id', 'T?'), 'text')
 
 	def _add_barcode(self):
 		item = self.canvas.add_barcode('123456789012', 'code128')
+		self._on_element_added(getattr(item, 'element_id', 'B?'), 'barcode')
 
 	def _add_qr(self):
 		item = self.canvas.add_qr('QR DATA')
+		self._on_element_added(getattr(item, 'element_id', 'Q?'), 'qr')
 
 	def _delete_selected(self):
 		it = self._selected()
@@ -257,9 +357,84 @@ class MainWindow(QMainWindow):
 		self.status.showMessage(f'Deleted {elt_id}', 2000)
 
 	def _on_element_added(self, element_id: str, typ: str):
-		self.left.elements_list.addItem(f"{element_id} • {typ}")
+		# Guard against duplicates
+		for i in range(self.left.elements_list.count()):
+			if self.left.elements_list.item(i).text().startswith(element_id + ' '):
+				break
+		else:
+			name = self._get_item_name(element_id) or ''
+			label = f"{element_id} • {typ}"
+			if name:
+				label += f" • {name}"
+			self.left.elements_list.addItem(label)
 		self.left.elements_list.setCurrentRow(self.left.elements_list.count()-1)
 		self._select_from_list()
+
+	def _rebuild_elements_list(self):
+		self.left.elements_list.clear()
+		items = [it for it in self.canvas.scene_obj.items() if hasattr(it, 'element_id')]
+		items.sort(key=lambda it: it.zValue())
+		for it in items:
+			elt_id = it.element_id
+			if hasattr(it, 'toPlainText') and not hasattr(it, 'data'):
+				typ = 'text'
+			elif hasattr(it, 'symbology'):
+				typ = 'barcode'
+			else:
+				typ = 'qr'
+			name = getattr(it, 'user_name', '')
+			label = f"{elt_id} • {typ}"
+			if name:
+				label += f" • {name}"
+			self.left.elements_list.addItem(label)
+
+	def _get_item_by_id(self, elt_id: str):
+		for it in self.canvas.scene_obj.items():
+			if hasattr(it, 'element_id') and it.element_id == elt_id:
+				return it
+		return None
+
+	def _get_item_name(self, elt_id: str) -> str:
+		it = self._get_item_by_id(elt_id)
+		return getattr(it, 'user_name', '') if it else ''
+
+	def _rename_element(self):
+		row = self.left.elements_list.currentItem()
+		if not row:
+			return
+		elt_id = row.text().split(' ')[0]
+		new_name = self.left.rename_input.text().strip()
+		it = self._get_item_by_id(elt_id)
+		if it is None:
+			return
+		setattr(it, 'user_name', new_name)
+		# Update label text
+		typ = 'text' if hasattr(it, 'toPlainText') and not hasattr(it, 'data') else ('barcode' if hasattr(it, 'symbology') else 'qr')
+		label = f"{elt_id} • {typ}"
+		if new_name:
+			label += f" • {new_name}"
+		row.setText(label)
+
+	def _reorder_selected(self, delta: int):
+		idx = self.left.elements_list.currentRow()
+		if idx < 0:
+			return
+		new_idx = idx + delta
+		if new_idx < 0 or new_idx >= self.left.elements_list.count():
+			return
+		item = self.left.elements_list.takeItem(idx)
+		self.left.elements_list.insertItem(new_idx, item)
+		self.left.elements_list.setCurrentRow(new_idx)
+		# Rebuild z-order: top of list gets higher z
+		self._rebuild_z_order()
+
+	def _rebuild_z_order(self):
+		for i in range(self.left.elements_list.count()):
+			text = self.left.elements_list.item(i).text()
+			elt_id = text.split(' ')[0]
+			it = self._get_item_by_id(elt_id)
+			if it:
+				it.setZValue(i)
 
 	def _select_from_list(self):
 		row = self.left.elements_list.currentItem()
@@ -292,12 +467,13 @@ class MainWindow(QMainWindow):
 			self.left.elements_list.clear()
 			load_template_file(self.canvas.scene_obj, path)
 			self.status.showMessage(f'Loaded template from {path}', 3000)
-			# repopulate list already handled by element_added signals during load
+			# Ensure list reflects loaded elements
+			self._rebuild_elements_list()
 		else:
 			self.status.showMessage('Template file missing', 3000)
 
 	def _print_current(self):
-		out = os.path.expanduser('~/gpp_preview.png')
+		out = self._runtime_file('gpp_preview.png')
 		render_scene_to_png(self.canvas.scene_obj, out, dpi=300)
 		try:
 			jid = cups_print_png(out, printer=os.environ.get('QL_PRINTER', 'Brother_QL_1100'), pagesize='DC06', autocut=True)
@@ -315,26 +491,27 @@ class MainWindow(QMainWindow):
 		if not it:
 			self.inspector.set_values(0, 0, 0, 0); return
 		ppm = self.canvas.scene_obj.pixels_per_mm
-		x = it.pos().x() / ppm; y = it.pos().y() / ppm
+		x = int(round(it.pos().x() / ppm))
+		y = int(round(it.pos().y() / ppm))
 		if hasattr(it, 'target_w_mm'):
-			w = it.target_w_mm; h = it.target_h_mm
+			w = int(round(it.target_w_mm)); h = int(round(it.target_h_mm))
 			self.inspector.code_input.setText(getattr(it, 'data', ''))
 			self.inspector.text_input.setText('')
 			# hide font controls for codes? keep but no-op
 		else:
-			bw = it.boundingRect().width() / ppm; bh = it.boundingRect().height() / ppm
+			bw = int(round(it.boundingRect().width() / ppm)); bh = int(round(it.boundingRect().height() / ppm))
 			try:
 				tw = it.textWidth()
 				if tw and tw > 0:
-					bw = tw / ppm
+					bw = int(round(tw / ppm))
 			except Exception:
 				pass
 			w, h = bw, bh
 			self.inspector.text_input.setText(it.toPlainText())
 			self.inspector.code_input.setText('')
 			# font reflect
-			f = it.font(); self.inspector.font.setCurrentText(f.family()); self.inspector.font_size.setValue(max(6, f.pointSize())); self.inspector.font_bold.setChecked(f.bold())
-		self.inspector.set_values(round(x,1), round(y,1), round(w,1), round(h,1))
+			f = it.font(); self.inspector.font.setCurrentText(f.family()); self.inspector.font_size.setValue(max(6, int(f.pointSize()))); self.inspector.font_bold.setChecked(f.bold())
+		self.inspector.set_values(x, y, w, h)
 
 	def _apply_inspector(self):
 		if self.inspector._guard:
@@ -343,19 +520,19 @@ class MainWindow(QMainWindow):
 		if not it:
 			return
 		ppm = self.canvas.scene_obj.pixels_per_mm
-		x = self.inspector.x.value() * ppm
-		y = self.inspector.y.value() * ppm
+		x = int(self.inspector.x.value()) * ppm
+		y = int(self.inspector.y.value()) * ppm
 		it.setPos(x, y)
-		wmm = self.inspector.w.value(); hmm = self.inspector.h.value()
+		wmm = int(self.inspector.w.value()); hmm = int(self.inspector.h.value())
 		if hasattr(it, 'target_w_mm'):
-			it.target_w_mm = max(5.0, wmm); it.target_h_mm = max(5.0, hmm)
+			it.target_w_mm = max(5.0, float(wmm)); it.target_h_mm = max(5.0, float(hmm))
 			try:
 				it._render()
 			except Exception:
 				pass
 		else:
 			try:
-				it.setTextWidth(max(0.0, wmm * ppm))
+				it.setTextWidth(max(0.0, float(wmm) * ppm))
 			except Exception:
 				pass
 
@@ -371,11 +548,28 @@ class MainWindow(QMainWindow):
 		except Exception:
 			pass
 
+	def _apply_alignment(self):
+		it = self._selected()
+		if not it or not hasattr(it, 'set_alignment'):
+			return
+		try:
+			it.set_alignment(self.inspector.align.currentText())
+		except Exception:
+			pass
+
 	def _apply_text(self):
 		it = self._selected()
 		if not it or not hasattr(it, 'toPlainText'):
 			return
 		it.setPlainText(self.inspector.text_input.text())
+
+	def _rotate_selected(self):
+		# Rotate each selected item by 90 degrees around its center
+		items = self.canvas.scene_obj.selectedItems()
+		for it in items:
+			c = it.boundingRect().center()
+			it.setTransformOriginPoint(c)
+			it.setRotation((it.rotation() + 90) % 360)
 
 	def _apply_code(self):
 		it = self._selected()
@@ -389,10 +583,16 @@ class MainWindow(QMainWindow):
 				pass
 
 	def _csv_build_from_elements(self):
-		# Columns based on Elements list order (IDs)
-		cols = [self.left.elements_list.item(i).text().split(' ')[0] for i in range(self.left.elements_list.count())]
-		self.left.csv_table.setColumnCount(len(cols))
-		self.left.csv_table.setHorizontalHeaderLabels(cols)
+		# Columns based on Elements list order (IDs + optional custom names)
+		headers = []
+		for i in range(self.left.elements_list.count()):
+			label = self.left.elements_list.item(i).text()
+			parts = [p.strip() for p in label.split('•')]
+			elt_id = parts[0]
+			elt_name = parts[2] if len(parts) >= 3 else ''
+			headers.append(f"{elt_id} • {elt_name}" if elt_name else elt_id)
+		self.left.csv_table.setColumnCount(len(headers))
+		self.left.csv_table.setHorizontalHeaderLabels(headers)
 		# keep existing rows
 		self.status.showMessage('CSV columns built from current Elements', 3000)
 
@@ -404,7 +604,7 @@ class MainWindow(QMainWindow):
 	def _csv_save(self):
 		name = self.left.csv_name.text().strip() or 'data'
 		path = os.path.join(self._csv_dir(), f'{name}.csv')
-		# Write simple CSV: header row of IDs; then rows of cell text
+		# Write simple CSV: header row of IDs (with names); then rows of cell text
 		cols = [self.left.csv_table.horizontalHeaderItem(c).text() for c in range(self.left.csv_table.columnCount())]
 		with open(path, 'w', encoding='utf-8') as f:
 			f.write(','.join(cols) + '\n')
@@ -415,6 +615,13 @@ class MainWindow(QMainWindow):
 					cells.append((item.text() if item else '').replace(',', ' '))
 				f.write(','.join(cells) + '\n')
 		self._refresh_csv(); self.status.showMessage(f'Saved CSV to {path}', 3000)
+
+	def _csv_header_to_id(self, header: str) -> str:
+		h = header.strip()
+		if '•' in h:
+			return h.split('•')[0].strip()
+		# fallback: take first token
+		return h.split(' ')[0] if ' ' in h else h
 
 	def _csv_load(self):
 		row = self.left.csv_saved_list.currentItem()
@@ -436,17 +643,23 @@ class MainWindow(QMainWindow):
 				self.left.csv_table.setItem(r, c, QTableWidgetItem(v))
 		self.status.showMessage(f'Loaded CSV {path}', 3000)
 
+	def _csv_preview_row(self, r: int):
+		cols = [self.left.csv_table.horizontalHeaderItem(c).text() for c in range(self.left.csv_table.columnCount())]
+		self._apply_csv_row_to_canvas(r, cols)
+		self.status.showMessage(f'Previewed row {r+1} on canvas', 2000)
+
 	def _csv_print_all(self):
 		# For each row: set content of elements (Text/QR/Barcode) by matching ID header
-		cols = [self.left.csv_table.horizontalHeaderItem(c).text() for c in range(self.left.csv_table.columnCount())]
+		cols_headers = [self.left.csv_table.horizontalHeaderItem(c).text() for c in range(self.left.csv_table.columnCount())]
+		col_ids = [self._csv_header_to_id(h) for h in cols_headers]
 		for r in range(self.left.csv_table.rowCount()):
 			# Apply row values
-			for c, col in enumerate(cols):
+			for c, elt_id in enumerate(col_ids):
 				val = self.left.csv_table.item(r, c)
 				val_text = val.text() if val else ''
 				# Find element by id
 				for it in self.canvas.scene_obj.items():
-					if hasattr(it, 'element_id') and it.element_id == col:
+					if hasattr(it, 'element_id') and it.element_id == elt_id:
 						if hasattr(it, 'toPlainText'):
 							it.setPlainText(val_text)
 						elif hasattr(it, 'data'):
@@ -454,12 +667,28 @@ class MainWindow(QMainWindow):
 							try: it._render()
 							except Exception: pass
 			# Print once for this row
-			out = os.path.expanduser('~/gpp_preview.png')
+			out = self._runtime_file('gpp_preview.png')
 			render_scene_to_png(self.canvas.scene_obj, out, dpi=300)
 			try:
 				cups_print_png(out, printer=os.environ.get('QL_PRINTER', 'Brother_QL_1100'), pagesize='DC06', autocut=True)
 			except Exception as e:
 				self.status.showMessage(f'Print error: {e}', 5000)
+
+	def _apply_csv_row_to_canvas(self, r: int, cols: list[str] | None = None):
+		if cols is None:
+			cols = [self.left.csv_table.horizontalHeaderItem(c).text() for c in range(self.left.csv_table.columnCount())]
+		col_ids = [self._csv_header_to_id(h) for h in cols]
+		for c, elt_id in enumerate(col_ids):
+			val = self.left.csv_table.item(r, c)
+			val_text = val.text() if val else ''
+			for it in self.canvas.scene_obj.items():
+				if hasattr(it, 'element_id') and it.element_id == elt_id:
+					if hasattr(it, 'toPlainText'):
+						it.setPlainText(val_text)
+					elif hasattr(it, 'data'):
+						it.data = val_text
+						try: it._render()
+						except Exception: pass
 
 
 def run_app():
