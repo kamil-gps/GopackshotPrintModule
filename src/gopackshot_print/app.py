@@ -4,11 +4,12 @@ from PySide6.QtWidgets import (
     QFormLayout, QDoubleSpinBox, QCheckBox, QComboBox, QLineEdit, QTableWidget,
     QTableWidgetItem, QAbstractItemView, QSpinBox, QFileDialog
 )
-from PySide6.QtCore import Qt, QSize, QMimeData, QSettings
+from PySide6.QtCore import Qt, QSize, QMimeData, QSettings, QTimer, QObject, Signal
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont as QFontGui, QKeySequence
 from .canvas import CanvasView
 from .template import save_template_file, load_template_file
 from .print_service import render_scene_to_png, cups_print_png
+from .cloud_link import AblyLink
 import os
 import glob
 
@@ -208,6 +209,11 @@ class InspectorPane(QWidget):
 		form.addRow('Alignment', self.align)
 		self.text_input = QLineEdit(); form.addRow('Text', self.text_input)
 		self.code_input = QLineEdit(); form.addRow('Code Data', self.code_input)
+		# New: text constraints
+		self.text_fit_width = QCheckBox('Fit width (clip overflow)'); self.text_fit_width.setChecked(True)
+		form.addRow('Fit Width', self.text_fit_width)
+		self.max_lines = QComboBox(); self.max_lines.addItems(['1', '2']); self.max_lines.setCurrentText('1')
+		form.addRow('Max Lines', self.max_lines)
 		# Rotate button in inspector
 		self.btn_rotate = QPushButton('Rotate 90°')
 		form.addRow('', self.btn_rotate)
@@ -216,6 +222,13 @@ class InspectorPane(QWidget):
 		self._guard = True
 		self.x.setValue(x); self.y.setValue(y); self.w.setValue(w); self.h.setValue(h)
 		self._guard = False
+
+
+class CloudBridge(QObject):
+	# Signal args: (name, data)
+	message = Signal(str, object)
+	# Signal args: (status, err)
+	status = Signal(str, object)
 
 
 class MainWindow(QMainWindow):
@@ -259,6 +272,8 @@ class MainWindow(QMainWindow):
 		self.inspector.align.currentTextChanged.connect(self._apply_alignment)
 		self.inspector.text_input.editingFinished.connect(self._apply_text)
 		self.inspector.code_input.editingFinished.connect(self._apply_code)
+		self.inspector.text_fit_width.stateChanged.connect(self._apply_text_constraints)
+		self.inspector.max_lines.currentTextChanged.connect(self._apply_text_constraints)
 		self.inspector.btn_rotate.clicked.connect(self._rotate_selected)
 		self.left.elements_list.currentRowChanged.connect(lambda _: self._select_from_list())
 		self.left.saved_list.itemDoubleClicked.connect(lambda _: self._load_template())
@@ -282,6 +297,32 @@ class MainWindow(QMainWindow):
 		self.left.csv_print_all.clicked.connect(self._csv_print_all)
 		self.left.csv_table.verticalHeader().sectionClicked.connect(self._csv_preview_row)
 
+		# ---- Cloud Link UI / Status ----
+		self.cloud_status_lbl = QLabel('Cloud: disabled')
+		self.status.addPermanentWidget(self.cloud_status_lbl)
+		mb = self.menuBar()
+		tools = mb.addMenu('Tools')
+		self.act_cloud_connect = tools.addAction('Cloud Connect')
+		self.act_cloud_disconnect = tools.addAction('Cloud Disconnect')
+		self.act_cloud_test = tools.addAction('Cloud Send Test')
+		self.act_cloud_settings = tools.addAction('Cloud Settings…')
+		self.act_cloud_connect.triggered.connect(self._cloud_connect)
+		self.act_cloud_disconnect.triggered.connect(self._cloud_disconnect)
+		self.act_cloud_test.triggered.connect(self._cloud_send_test)
+		self.act_cloud_settings.triggered.connect(self._open_cloud_settings)
+
+		# Cloud internals
+		self.cloud_link: AblyLink | None = None
+		self._cloud_bridge = CloudBridge()
+		self._cloud_bridge.message.connect(self._handle_cloud_message)
+		self._cloud_bridge.status.connect(self._handle_cloud_status)
+		self._cloud_hb = QTimer(self)
+		self._cloud_hb.setInterval(30000)
+		self._cloud_hb.timeout.connect(self._send_cloud_heartbeat)
+		self._cloud_cfg = self._load_cloud_settings()
+		if self._cloud_cfg.get('cloudEnabled') and self._cloud_cfg.get('cloudAutoconnect'):
+			self._cloud_connect()
+
 	def _load_templates_dir_from_settings(self):
 		settings = QSettings('Gopackshot', 'ImageFlowPrint')
 		path = settings.value('templates_dir', '', type=str)
@@ -289,6 +330,15 @@ class MainWindow(QMainWindow):
 			self._templates_dir_path = path
 		else:
 			base = os.path.dirname(os.path.abspath(__file__))
+			# If packaged with PyInstaller, bundled data lives under sys._MEIPASS/Templates
+			try:
+				import sys
+				if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+					self._templates_dir_path = os.path.join(sys._MEIPASS, 'Templates')
+					return
+			except Exception:
+				pass
+			# Dev mode: repository Templates folder
 			self._templates_dir_path = os.path.abspath(os.path.join(base, '..', '..', 'Templates'))
 
 	def _templates_dir(self):
@@ -298,9 +348,10 @@ class MainWindow(QMainWindow):
 		return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
 	def _runtime_dir(self):
-		path = os.path.join(self._app_root(), 'runtime')
-		os.makedirs(path, exist_ok=True)
-		return path
+		# Store runtime files in user Application Support to avoid writing inside app bundle
+		base = os.path.expanduser('~/Library/Application Support/GopackshotPrintModule')
+		os.makedirs(base, exist_ok=True)
+		return base
 
 	def _runtime_file(self, name: str) -> str:
 		return os.path.join(self._runtime_dir(), name)
@@ -325,6 +376,212 @@ class MainWindow(QMainWindow):
 			self._templates_dir_path = path
 			QSettings('Gopackshot', 'ImageFlowPrint').setValue('templates_dir', path)
 			self._ensure_templates_dir(); self._refresh_saved(); self._ensure_csv_dir(); self._refresh_csv()
+
+	# ---- Cloud Link implementation ----
+	def _load_cloud_settings(self) -> dict:
+		# QSettings with env fallbacks
+		settings = QSettings('Gopackshot', 'ImageFlowPrint')
+		import os
+		def _get_bool(key: str, env: str, default: bool) -> bool:
+			val = settings.value(key, None)
+			if val is None:
+				val = os.environ.get(env, str(default))
+			return str(val).lower() in ('1', 'true', 'yes', 'on')
+		cfg = {
+			'cloudEnabled': _get_bool('cloudEnabled', 'GPP_CLOUD_ENABLED', False),
+			'cloudAutoconnect': _get_bool('cloudAutoconnect', 'GPP_CLOUD_AUTOCONNECT', True),
+			'cloudProvider': settings.value('cloudProvider', os.environ.get('GPP_CLOUD_PROVIDER', 'ably'), type=str),
+			'ably': {
+				'auth_url': settings.value('ably.auth_url', os.environ.get('GPP_ABLY_AUTH_URL', ''), type=str),
+				'api_key': settings.value('ably.api_key', os.environ.get('GPP_ABLY_KEY', ''), type=str),
+				'channel': settings.value('ably.channel', os.environ.get('GPP_ABLY_CHANNEL', 'gopackshot:print-module:default'), type=str),
+				'client_id': settings.value('ably.client_id', os.environ.get('GPP_ABLY_CLIENT_ID', ''), type=str),
+			},
+		}
+		return cfg
+
+	def _cloud_connect(self):
+		# Setup and start AblyLink
+		cfg = self._cloud_cfg
+		if cfg.get('cloudProvider') != 'ably':
+			self.status.showMessage('Cloud provider not supported', 3000); return
+		ably_cfg = cfg.get('ably', {})
+		api_key = (ably_cfg.get('api_key') or '').strip() or None
+		auth_url = (ably_cfg.get('auth_url') or '').strip() or None
+		client_id = (ably_cfg.get('client_id') or '').strip() or None
+		channel = ably_cfg.get('channel') or 'gopackshot:print-module:default'
+		if not api_key and not auth_url:
+			self.status.showMessage('Cloud connect: missing Ably credentials (auth_url or api_key)', 6000)
+			self.cloud_status_lbl.setText('Cloud: error (no credentials)')
+			return
+		if self.cloud_link:
+			# already created; stop first
+			try:
+				self.cloud_link.stop()
+			except Exception:
+				pass
+		self.cloud_status_lbl.setText('Cloud: connecting…')
+		# Route callbacks via Qt signals to the GUI thread
+		self.cloud_link = AblyLink(
+			api_key=api_key,
+			auth_url=auth_url,
+			client_id=client_id,
+			channel=channel,
+			on_message=self._cloud_bridge.message.emit,
+			on_status=lambda s, e: self._cloud_bridge.status.emit(s, e),
+			logger=None,
+		)
+		try:
+			self.cloud_link.start()
+		except Exception as exc:
+			self.status.showMessage(f'Cloud connect failed: {exc}', 6000)
+			self.cloud_status_lbl.setText('Cloud: error')
+
+	def _cloud_disconnect(self):
+		try:
+			if self._cloud_hb.isActive():
+				self._cloud_hb.stop()
+		except Exception:
+			pass
+		try:
+			if self.cloud_link:
+				self.cloud_link.stop()
+				self.cloud_link = None
+		except Exception:
+			pass
+		self.cloud_status_lbl.setText('Cloud: disconnected')
+		self.status.showMessage('Cloud disconnected', 3000)
+
+	def _handle_cloud_status(self, status: str, err: object):
+		# status: connecting, connected, disconnected, failed, error, publish
+		st = str(status).lower() if status else 'unknown'
+		if st == 'connected':
+			self.cloud_status_lbl.setText('Cloud: connected')
+			if not self._cloud_hb.isActive():
+				self._cloud_hb.start()
+			# send initial heartbeat
+			self._send_cloud_heartbeat()
+		elif st in ('disconnected', 'failed', 'error'):
+			self.cloud_status_lbl.setText(f'Cloud: {st}')
+			if self._cloud_hb.isActive():
+				self._cloud_hb.stop()
+		elif st == 'publish':
+			# no-op; could flash something
+			pass
+		else:
+			self.cloud_status_lbl.setText(f'Cloud: {st}')
+		if err:
+			self.status.showMessage(f'Cloud status: {st} ({err})', 3000)
+
+	def _cloud_publish(self, name: str, data: object) -> bool:
+		if not self.cloud_link:
+			return False
+		try:
+			return self.cloud_link.publish(name, data)
+		except Exception:
+			return False
+
+	def _send_cloud_heartbeat(self):
+		from . import __version__
+		payload = {
+			'clientId': self._cloud_cfg.get('ably', {}).get('client_id') or '',
+			'app': 'GopackshotPrintModule',
+			'version': __version__,
+			'templatesDir': self._templates_dir(),
+			'ts': int(__import__('time').time()),
+		}
+		self._cloud_publish('heartbeat', payload)
+
+	def _cloud_send_test(self):
+		ok = self._cloud_publish('status', self._status_snapshot())
+		self.status.showMessage('Cloud test message sent' if ok else 'Cloud test failed', 3000)
+
+	def _handle_cloud_message(self, name: str, data: object):
+		try:
+			cmd = (name or '').lower()
+			if cmd == 'ping':
+				self._cloud_publish('pong', {'clientId': self._cloud_cfg.get('ably', {}).get('client_id') or '', 'app': 'GopackshotPrintModule'})
+				return
+			if cmd == 'notify':
+				msg = '' if data is None else (data if isinstance(data, str) else str(data))
+				self.status.showMessage(msg[:200], 5000)
+				return
+			if cmd == 'request-status':
+				self._cloud_publish('status', self._status_snapshot())
+				return
+			if cmd == 'open-cloud-settings':
+				self._open_cloud_settings()
+				self._cloud_publish('ack', {'ok': True})
+				return
+			if cmd == 'print-request':
+				self._handle_print_request(data)
+				return
+		except Exception as exc:
+			self.status.showMessage(f'Cloud message error: {exc}', 6000)
+
+	def _status_snapshot(self) -> dict:
+		import os
+		return {
+			'clientId': self._cloud_cfg.get('ably', {}).get('client_id') or '',
+			'printer': os.environ.get('QL_PRINTER', 'Brother_QL_1100'),
+			'pagesizeDefault': 'DC06',
+			'app': 'GopackshotPrintModule',
+		}
+
+	def _open_cloud_settings(self):
+		self.status.showMessage('Cloud settings not implemented yet. Use env/QSettings.', 5000)
+
+	def _apply_elements_mapping(self, mapping: dict[str, str]):
+		# Set element content by id, for text/barcode/qr items
+		if not mapping:
+			return
+		for it in self.canvas.scene_obj.items():
+			if not hasattr(it, 'element_id'):
+				continue
+			elt_id = it.element_id
+			if elt_id in mapping:
+				val_text = mapping.get(elt_id) or ''
+				if hasattr(it, 'toPlainText'):
+					it.setPlainText(val_text)
+				elif hasattr(it, 'data'):
+					it.data = val_text
+					try:
+						it._render()
+					except Exception:
+						pass
+
+	def _handle_print_request(self, data: object):
+		# data expected: dict with templatePath (optional), elements mapping, printer/pagesize/dpi/autocut/previewOnly, requestId
+		try:
+			payload = data if isinstance(data, dict) else {}
+			request_id = payload.get('requestId')
+			tpl = payload.get('templatePath')
+			if tpl and isinstance(tpl, str) and os.path.exists(tpl):
+				self.left.elements_list.clear()
+				load_template_file(self.canvas.scene_obj, tpl)
+				self._rebuild_elements_list()
+			# Apply elements mapping
+			elts = payload.get('elements') or {}
+			if isinstance(elts, dict):
+				self._apply_elements_mapping({str(k): (v if v is not None else '') for k, v in elts.items()})
+			# Render and maybe print
+			out = self._runtime_file('gpp_preview.png')
+			dpi = int(payload.get('dpi') or 300)
+			render_scene_to_png(self.canvas.scene_obj, out, dpi=dpi)
+			job_id = None
+			if not bool(payload.get('previewOnly')):
+				printer = payload.get('printer') or os.environ.get('QL_PRINTER', 'Brother_QL_1100')
+				pagesize = payload.get('pagesize') or 'DC06'
+				autocut = bool(payload.get('autocut', True))
+				job_id = cups_print_png(out, printer=printer, pagesize=pagesize, autocut=autocut)
+			ack = {'requestId': request_id, 'ok': True}
+			if job_id is not None:
+				ack['jobId'] = job_id
+			self._cloud_publish('print-ack', ack)
+			self.status.showMessage('Cloud print-request handled', 3000)
+		except Exception as exc:
+			self._cloud_publish('print-ack', {'requestId': (payload.get('requestId') if isinstance(data, dict) else None), 'ok': False, 'error': str(exc)})
+			self.status.showMessage(f'Cloud print error: {exc}', 6000)
 
 	def _refresh_csv(self):
 		self.left.csv_saved_list.clear()
@@ -511,6 +768,9 @@ class MainWindow(QMainWindow):
 			self.inspector.code_input.setText('')
 			# font reflect
 			f = it.font(); self.inspector.font.setCurrentText(f.family()); self.inspector.font_size.setValue(max(6, int(f.pointSize()))); self.inspector.font_bold.setChecked(f.bold())
+			# constraints reflect
+			self.inspector.text_fit_width.setChecked(getattr(it, 'fit_width', True))
+			self.inspector.max_lines.setCurrentText(str(getattr(it, 'max_lines', 1)))
 		self.inspector.set_values(x, y, w, h)
 
 	def _apply_inspector(self):
@@ -533,6 +793,12 @@ class MainWindow(QMainWindow):
 		else:
 			try:
 				it.setTextWidth(max(0.0, float(wmm) * ppm))
+			except Exception:
+				pass
+			# apply max height override for text items
+			try:
+				if hasattr(it, 'set_max_height_mm'):
+					it.set_max_height_mm(float(hmm) if hmm > 0 else None)
 			except Exception:
 				pass
 
@@ -562,6 +828,19 @@ class MainWindow(QMainWindow):
 		if not it or not hasattr(it, 'toPlainText'):
 			return
 		it.setPlainText(self.inspector.text_input.text())
+
+	def _apply_text_constraints(self):
+		it = self._selected()
+		if not it or not hasattr(it, 'set_fit_width'):
+			return
+		try:
+			it.set_fit_width(self.inspector.text_fit_width.isChecked())
+		except Exception:
+			pass
+		try:
+			it.set_max_lines(int(self.inspector.max_lines.currentText()))
+		except Exception:
+			pass
 
 	def _rotate_selected(self):
 		# Rotate each selected item by 90 degrees around its center

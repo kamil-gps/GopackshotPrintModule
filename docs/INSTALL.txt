@@ -1,0 +1,35 @@
+Gopackshot Print Module — Local Install (no Apple Developer account)
+
+Artifacts:
+- DMG:   dist/dmg/Gopackshot_PrintModule-<version>.dmg
+- PKG:   dist/pkg/Gopackshot_PrintModule-<version>.pkg
+
+Option A — GUI (DMG):
+1) Copy the DMG to the Mac (AirDrop/USB recommended).
+2) Double-click the DMG, drag “Gopackshot PrintModule.app” to Applications.
+3) First launch: Right‑click the app → Open → Open.
+
+Option B — One‑click script (recommended for your own Macs):
+1) Double‑click scripts/install_from_folder.command
+   - It finds the app bundle in the kit, copies it to /Applications,
+     removes Gatekeeper quarantine, and opens the app.
+
+Option C — Terminal (advanced):
+  DMG:
+    xattr -dr com.apple.quarantine ~/Downloads/Gopackshot_PrintModule-*.dmg
+    hdiutil attach ~/Downloads/Gopackshot_PrintModule-*.dmg
+    cp -R "/Volumes/Gopackshot PrintModule/Gopackshot PrintModule.app" /Applications/
+    xattr -dr com.apple.quarantine "/Applications/Gopackshot PrintModule.app"
+    open -a "Gopackshot PrintModule"
+
+  PKG:
+    xattr -dr com.apple.quarantine ~/Downloads/Gopackshot_PrintModule-*.pkg
+    sudo installer -pkg ~/Downloads/Gopackshot_PrintModule-*.pkg -target /
+    open -a "Gopackshot PrintModule"
+
+Notes:
+- The app is self‑contained (no separate Python install needed).
+- If macOS still warns, use Right‑click → Open once. After the first run, it won’t prompt again.
+- Templates are bundled; you can override the Templates folder in the app settings.
+- Cloud Link can be configured via environment variables or QSettings.
+

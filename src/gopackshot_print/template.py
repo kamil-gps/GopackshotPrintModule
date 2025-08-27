@@ -15,10 +15,12 @@ def serialize_scene(scene) -> Dict[str, Any]:
 		return px / ppm
 
 	def rect_mm(item):
+		# Use item position as anchor, and store bounding size separately for rotation stability
+		p = item.pos() if hasattr(item, 'pos') else None
 		r = item.sceneBoundingRect()
 		return {
-			"xMm": round(px_to_mm(r.left()), 2),
-			"yMm": round(px_to_mm(r.top()), 2),
+			"xMm": round(px_to_mm(p.x()), 2) if p else 0.0,
+			"yMm": round(px_to_mm(p.y()), 2) if p else 0.0,
 			"wMm": round(px_to_mm(r.width()), 2),
 			"hMm": round(px_to_mm(r.height()), 2),
 		}
@@ -52,6 +54,17 @@ def serialize_scene(scene) -> Dict[str, Any]:
 					payload["align"] = align
 				if max_w_px and max_w_px > 0:
 					payload["maxWidthMm"] = round(max_w_px / ppm, 2)
+				# persist optional max height override if defined
+				mh = getattr(it, 'max_height_mm_override', None)
+				if isinstance(mh, (int, float)) and mh > 0:
+					payload["maxHeightMm"] = round(float(mh), 2)
+				# persist fit width + max lines if available
+				fw = getattr(it, 'fit_width', None)
+				if isinstance(fw, bool):
+					payload["fitWidth"] = fw
+				ml = getattr(it, 'max_lines', None)
+				if isinstance(ml, int) and ml in (1, 2):
+					payload["maxLines"] = ml
 				elt.update(payload)
 			elif it.__class__.__name__ == 'BarcodeItem':
 				elt.update({"type": "barcode", "data": it.data, "symbology": it.symbology,
@@ -63,7 +76,7 @@ def serialize_scene(scene) -> Dict[str, Any]:
 			elements.append(elt)
 
 	return {
-		"schemaVersion": 1,
+		"schemaVersion": 2,
 		"label": {
 			"widthMm": scene.width_mm,
 			"heightMm": scene.height_mm,
@@ -93,10 +106,13 @@ def deserialize_scene(scene, data: Dict[str, Any]) -> None:
 		scene.removeItem(it)
 
 	label = data.get('label', {})
+	schema_version = int(data.get('schemaVersion', 1) or 1)
 	scene.width_mm = float(label.get('widthMm', 62.0))
 	scene.height_mm = float(label.get('heightMm', 29.0))
 	scene.grid_mm = float(label.get('gridMm', 1.0))
-	scene.snap_enabled = bool(label.get('snap', True))
+	# Defer snapping during load to avoid rounding positions
+	desired_snap = bool(label.get('snap', True))
+	scene.snap_enabled = False
 	# Keep scene.pixels_per_mm as-is to match display DPI settings
 	# Recompute label rect
 	scene.label_rect.setWidth(scene.width_mm * scene.pixels_per_mm)
@@ -110,7 +126,6 @@ def deserialize_scene(scene, data: Dict[str, Any]) -> None:
 		y = float(elt.get('yMm', 0)) * scene.pixels_per_mm
 		if etype == 'text':
 			item = scene.add_text_with_id(id_, elt.get('text', ''))
-			item.setPos(x, y)
 			f = elt.get('font') or {}
 			fam = f.get('family', 'Arial'); size_pt = int(f.get('size', 18) or 18); bold = bool(f.get('bold', False))
 			try:
@@ -129,36 +144,97 @@ def deserialize_scene(scene, data: Dict[str, Any]) -> None:
 					item.setTextWidth(float(elt['maxWidthMm']) * scene.pixels_per_mm)
 				except Exception:
 					pass
+			# max height override (optional)
+			if 'maxHeightMm' in elt:
+				try:
+					mh = float(elt['maxHeightMm'])
+					item.set_max_height_mm(mh if mh > 0 else None)
+				except Exception:
+					pass
+			# new: fit width + max lines
+			if 'fitWidth' in elt:
+				try: item.set_fit_width(bool(elt['fitWidth']))
+				except Exception: pass
+			if 'maxLines' in elt:
+				try:
+					ml = int(elt['maxLines'])
+					if ml in (1, 2): item.set_max_lines(ml)
+				except Exception: pass
 			# restore name and rotation
 			if 'name' in elt:
 				setattr(item, 'user_name', elt['name'])
 			if 'rotation' in elt:
-				try: item.setRotation(float(elt['rotation']))
-				except Exception: pass
+				try:
+					# Set rotation around center for stable geometry
+					c = item.boundingRect().center()
+					item.setTransformOriginPoint(c)
+					item.setRotation(float(elt['rotation']))
+				except Exception:
+					pass
+			# final positioning
+			if schema_version >= 2:
+				item.setPos(x, y)
+			else:
+				try:
+					from PySide6.QtCore import QPointF
+					curr = item.sceneBoundingRect().topLeft()
+					delta = QPointF(x - curr.x(), y - curr.y())
+					item.setPos(item.pos() + delta)
+				except Exception:
+					item.setPos(x, y)
 		elif etype == 'barcode':
 			item = scene.add_barcode_with_id(id_, elt.get('data', ''), elt.get('symbology', 'code128'))
-			item.setPos(x, y)
 			if 'targetWmm' in elt: item.target_w_mm = float(elt['targetWmm'])
 			if 'targetHmm' in elt: item.target_h_mm = float(elt['targetHmm'])
 			item._render()
 			if 'name' in elt:
 				setattr(item, 'user_name', elt['name'])
 			if 'rotation' in elt:
-				try: item.setRotation(float(elt['rotation']))
-				except Exception: pass
+				try:
+					c = item.boundingRect().center()
+					item.setTransformOriginPoint(c)
+					item.setRotation(float(elt['rotation']))
+				except Exception:
+					pass
+			# final positioning
+			if schema_version >= 2:
+				item.setPos(x, y)
+			else:
+				try:
+					from PySide6.QtCore import QPointF
+					curr = item.sceneBoundingRect().topLeft()
+					delta = QPointF(x - curr.x(), y - curr.y())
+					item.setPos(item.pos() + delta)
+				except Exception:
+					item.setPos(x, y)
 		elif etype == 'qr':
 			item = scene.add_qr_with_id(id_, elt.get('data', ''))
-			item.setPos(x, y)
 			if 'targetWmm' in elt: item.target_w_mm = float(elt['targetWmm'])
 			if 'targetHmm' in elt: item.target_h_mm = float(elt['targetHmm'])
 			item._render()
 			if 'name' in elt:
 				setattr(item, 'user_name', elt['name'])
 			if 'rotation' in elt:
-				try: item.setRotation(float(elt['rotation']))
-				except Exception: pass
+				try:
+					c = item.boundingRect().center()
+					item.setTransformOriginPoint(c)
+					item.setRotation(float(elt['rotation']))
+				except Exception:
+					pass
+			# final positioning
+			if schema_version >= 2:
+				item.setPos(x, y)
+			else:
+				try:
+					from PySide6.QtCore import QPointF
+					curr = item.sceneBoundingRect().topLeft()
+					delta = QPointF(x - curr.x(), y - curr.y())
+					item.setPos(item.pos() + delta)
+				except Exception:
+					item.setPos(x, y)
 
-	# Reset counters based on loaded IDs
+	# Restore snapping and reset counters based on loaded IDs
+	scene.snap_enabled = desired_snap
 	ids = [e.get('id', '') for e in data.get('elements', [])]
 	scene._id_counters = {
 		"text": _max_id(ids, 'T'),

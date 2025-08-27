@@ -1,5 +1,5 @@
 from PySide6.QtCore import QRectF, QPointF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPen, QFont, QImage, QPixmap, QTextOption
+from PySide6.QtGui import QBrush, QColor, QPen, QFont, QImage, QPixmap, QTextOption, QFontMetricsF
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QGraphicsPixmapItem
 import qrcode
 import io
@@ -21,6 +21,9 @@ class TextItem(QGraphicsTextItem):
 		super().__init__(text)
 		self.scene_ref = scene
 		self.element_id = element_id
+		self.fit_width: bool = True
+		self.max_lines: int = 1
+		self.max_height_mm_override: float | None = None
 		self.setFlags(
 			QGraphicsItem.ItemIsSelectable |
 			QGraphicsItem.ItemIsMovable |
@@ -33,13 +36,28 @@ class TextItem(QGraphicsTextItem):
 		self.setDefaultTextColor(Qt.black)
 		# Ensure wrapping is enabled so setTextWidth acts as max width
 		opt = self.document().defaultTextOption()
-		opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+		opt.setWrapMode(QTextOption.NoWrap)
 		self.document().setDefaultTextOption(opt)
 
+	def _preserve_center_update(self, fn):
+		try:
+			old_center_scene = self.mapToScene(self.boundingRect().center())
+			fn()
+			new_center_local = self.boundingRect().center()
+			self.setTransformOriginPoint(new_center_local)
+			new_center_scene = self.mapToScene(new_center_local)
+			delta = new_center_scene - old_center_scene
+			self.setPos(self.pos() - delta)
+		except Exception:
+			fn()
+
 	def set_font(self, family: str, size_pt: int, bold: bool):
-		f = QFont(family, size_pt)
-		f.setBold(bool(bold))
-		self.setFont(f)
+		def _apply():
+			f = QFont(family, size_pt)
+			f.setBold(bool(bold))
+			self.setFont(f)
+			self._update_text_option()
+		self._preserve_center_update(_apply)
 
 	def set_alignment(self, align: str):
 		opt = self.document().defaultTextOption()
@@ -51,6 +69,14 @@ class TextItem(QGraphicsTextItem):
 			opt.setAlignment(Qt.AlignLeft)
 		self.document().setDefaultTextOption(opt)
 
+	def setPlainText(self, text: str) -> None:  # type: ignore[override]
+		from PySide6.QtWidgets import QGraphicsTextItem as _BaseText
+		self._preserve_center_update(lambda: _BaseText.setPlainText(self, text))
+
+	def setTextWidth(self, width: float) -> None:  # type: ignore[override]
+		from PySide6.QtWidgets import QGraphicsTextItem as _BaseText
+		self._preserve_center_update(lambda: _BaseText.setTextWidth(self, width))
+
 	def get_alignment(self) -> str:
 		al = self.document().defaultTextOption().alignment()
 		if al & Qt.AlignHCenter:
@@ -58,6 +84,67 @@ class TextItem(QGraphicsTextItem):
 		if al & Qt.AlignRight:
 			return 'Right'
 		return 'Left'
+
+	def set_fit_width(self, value: bool):
+		self.fit_width = bool(value)
+		# When not fitting width, allow unlimited width
+		if not self.fit_width:
+			try:
+				self.setTextWidth(0)
+			except Exception:
+				pass
+		self._update_text_option(); self.update()
+
+	def set_max_lines(self, lines: int):
+		self.max_lines = 1 if int(lines) <= 1 else 2
+		self._update_text_option(); self.update()
+
+	def _update_text_option(self):
+		opt = self.document().defaultTextOption()
+		# One line: no wrap. Two lines: wrap to width if available
+		opt.setWrapMode(QTextOption.NoWrap if self.max_lines <= 1 else QTextOption.WrapAtWordBoundaryOrAnywhere)
+		self.document().setDefaultTextOption(opt)
+
+	def set_max_height_mm(self, mm: float | None):
+		try:
+			if mm is None or float(mm) <= 0:
+				self.max_height_mm_override = None
+			else:
+				self.max_height_mm_override = float(mm)
+			self.update()
+		except Exception:
+			pass
+
+	def paint(self, painter, option, widget=None):
+		painter.save()
+		width_px = self.textWidth() if (self.fit_width and self.textWidth() > 0) else float('inf')
+		fm = QFontMetricsF(self.font())
+		line_height = fm.lineSpacing()
+		if self.max_height_mm_override is not None:
+			max_h_px = mm_to_px(self.max_height_mm_override, self.scene_ref.pixels_per_mm)
+		else:
+			max_h_px = (line_height * (1 if self.max_lines <= 1 else 2)) + fm.descent()
+		# Clip if width/height are constrained
+		clip_w = width_px if width_px != float('inf') else 1e9
+		clip_h = max_h_px if max_h_px != float('inf') else 1e9
+		painter.setClipRect(0, 0, clip_w, clip_h)
+		super().paint(painter, option, widget)
+		# Draw clipping overlay if text would overflow
+		try:
+			if getattr(self.scene_ref, 'debug_overlays', False):
+				fm = QFontMetricsF(self.font())
+				# approximate required width and height
+				text = self.toPlainText()
+				req_h = fm.lineSpacing() * (1 if self.max_lines <= 1 else 2)
+				if (clip_h < 1e9 and req_h > clip_h) or (clip_w < 1e9 and fm.horizontalAdvance(text) > clip_w):
+					pen = QPen(QColor(255, 0, 0, 160))
+					pen.setStyle(Qt.DashLine)
+					painter.setPen(pen)
+					painter.setBrush(Qt.NoBrush)
+					painter.drawRect(0, 0, clip_w, clip_h)
+		except Exception:
+			pass
+		painter.restore()
 
 	def itemChange(self, change, value):
 		if change == QGraphicsItem.ItemPositionChange and self.scene_ref.snap_enabled:
@@ -82,10 +169,15 @@ class LabelScene(QGraphicsScene):
 		self.grid_mm = grid_mm
 		self.snap_enabled = True
 		self.grid_enabled = True
+		self.debug_overlays = True
 		self.label_rect = QRectF(0, 0, mm_to_px(width_mm, pixels_per_mm), mm_to_px(height_mm, pixels_per_mm))
 		self.setSceneRect(self.label_rect.adjusted(-40, -40, 40, 40))
 		self.selectionChanged.connect(self.selection_changed)
 		self._id_counters = {"text": 0, "barcode": 0, "qr": 0}
+
+	def set_overlays(self, enabled: bool):
+		self.debug_overlays = enabled
+		self.update()
 
 	def set_grid(self, enabled: bool):
 		self.grid_enabled = enabled
@@ -250,6 +342,10 @@ class BarcodeItem(QGraphicsPixmapItem):
 		self._render()
 
 	def _render(self):
+		try:
+			old_center_scene = self.mapToScene(self.boundingRect().center())
+		except Exception:
+			old_center_scene = None
 		writer = ImageWriter()
 		writer.set_options({'foreground': 'black', 'background': 'white', 'write_text': False, 'quiet_zone': 2.0})
 		cls = barcode.get_barcode_class(self.symbology)
@@ -262,6 +358,15 @@ class BarcodeItem(QGraphicsPixmapItem):
 		buf = io.BytesIO(); pil_img.save(buf, format='PNG')
 		qimg = QImage.fromData(buf.getvalue(), 'PNG')
 		self.setPixmap(QPixmap.fromImage(qimg))
+		try:
+			new_center_local = self.boundingRect().center()
+			self.setTransformOriginPoint(new_center_local)
+			if old_center_scene is not None:
+				new_center_scene = self.mapToScene(new_center_local)
+				delta = new_center_scene - old_center_scene
+				self.setPos(self.pos() - delta)
+		except Exception:
+			pass
 
 	def itemChange(self, change, value):
 		if change == QGraphicsItem.ItemPositionChange and self.scene_ref.snap_enabled:
@@ -290,6 +395,10 @@ class QrItem(QGraphicsPixmapItem):
 		self._render()
 
 	def _render(self):
+		try:
+			old_center_scene = self.mapToScene(self.boundingRect().center())
+		except Exception:
+			old_center_scene = None
 		qr = qrcode.QRCode(border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
 		qr.add_data(self.data)
 		qr.make(fit=True)
@@ -301,6 +410,15 @@ class QrItem(QGraphicsPixmapItem):
 		buf = io.BytesIO(); pil_img.save(buf, format='PNG')
 		qimg = QImage.fromData(buf.getvalue(), 'PNG')
 		self.setPixmap(QPixmap.fromImage(qimg))
+		try:
+			new_center_local = self.boundingRect().center()
+			self.setTransformOriginPoint(new_center_local)
+			if old_center_scene is not None:
+				new_center_scene = self.mapToScene(new_center_local)
+				delta = new_center_scene - old_center_scene
+				self.setPos(self.pos() - delta)
+		except Exception:
+			pass
 
 	def itemChange(self, change, value):
 		if change == QGraphicsItem.ItemPositionChange and self.scene_ref.snap_enabled:

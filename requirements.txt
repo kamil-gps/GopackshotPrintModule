@@ -4,3 +4,4 @@ brother_ql==0.9.4
 pycups==2.0.4
 PySide6==6.9.1
 python-barcode==0.15.1
+ably>=2.0.0

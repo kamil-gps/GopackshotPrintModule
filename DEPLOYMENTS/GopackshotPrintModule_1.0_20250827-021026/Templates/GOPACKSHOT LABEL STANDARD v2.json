@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "label": {
+    "widthMm": 62,
+    "heightMm": 29,
+    "pixelsPerMm": 8,
+    "gridMm": 1,
+    "snap": true
+  },
+  "elements": [
+    {
+      "id": "Q1",
+      "name": "QR main",
+      "xMm": 28,
+      "yMm": 0,
+      "wMm": 24,
+      "hMm": 24,
+      "type": "qr",
+      "data": "QR DATA",
+      "targetWmm": 24,
+      "targetHmm": 24
+    },
+    {
+      "id": "T1",
+      "name": "Right text",
+      "xMm": 52,
+      "yMm": 1,
+      "wMm": 10,
+      "hMm": 28,
+      "type": "text",
+      "text": "Sample Text Sample Text",
+      "font": { "family": "Arial", "size": 31, "bold": false }
+    },
+    {
+      "id": "T2",
+      "name": "Header",
+      "xMm": 0,
+      "yMm": 0,
+      "wMm": 27,
+      "hMm": 4,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 18, "bold": false }
+    },
+    {
+      "id": "T3",
+      "name": "Line 1",
+      "xMm": 0,
+      "yMm": 5,
+      "wMm": 21,
+      "hMm": 5,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 28, "bold": true }
+    },
+    {
+      "id": "T4",
+      "name": "Line 2",
+      "xMm": 0,
+      "yMm": 12,
+      "wMm": 28,
+      "hMm": 6,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 32, "bold": true }
+    },
+    {
+      "id": "T5",
+      "name": "Line 3",
+      "xMm": 0,
+      "yMm": 19,
+      "wMm": 28,
+      "hMm": 5,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 27, "bold": true }
+    },
+    {
+      "id": "T6",
+      "name": "Footer left",
+      "xMm": 0,
+      "yMm": 25,
+      "wMm": 26,
+      "hMm": 4,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 22, "bold": false }
+    },
+    {
+      "id": "T7",
+      "name": "Footer center",
+      "xMm": 28,
+      "yMm": 26,
+      "wMm": 24,
+      "hMm": 4,
+      "type": "text",
+      "text": "Sample Text",
+      "font": { "family": "Arial", "size": 18, "bold": false }
+    }
+  ]
+}

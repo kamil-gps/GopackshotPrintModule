@@ -1,0 +1,8 @@
+{
+  "default_deploy_root": "DEPLOYMENTS",
+  "bundle_name": "Gopackshot PrintModule",
+  "doc_filename": "README_DEPLOYMENT.md",
+  "install_dirname": "install_kit",
+  "version_increment": 0.1
+}
+

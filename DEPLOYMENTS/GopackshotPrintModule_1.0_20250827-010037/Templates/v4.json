@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "label": {
+    "widthMm": 62.0,
+    "heightMm": 29.0,
+    "pixelsPerMm": 8.0,
+    "gridMm": 1.0,
+    "snap": true
+  },
+  "elements": [
+    {
+      "id": "Q1",
+      "xMm": 28.0,
+      "yMm": 0.0,
+      "wMm": 24.12,
+      "hMm": 24.12,
+      "name": "QR main",
+      "type": "qr",
+      "data": "QR DATA",
+      "targetWmm": 24.0,
+      "targetHmm": 24.0
+    },
+    {
+      "id": "T2",
+      "xMm": 0.0,
+      "yMm": 0.0,
+      "wMm": 13.33,
+      "hMm": 3.62,
+      "name": "Header",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 18,
+        "bold": false
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T3",
+      "xMm": 0.0,
+      "yMm": 5.0,
+      "wMm": 21.35,
+      "hMm": 5.12,
+      "name": "Line 1",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 28,
+        "bold": true
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T4",
+      "xMm": 0.0,
+      "yMm": 12.0,
+      "wMm": 24.27,
+      "hMm": 5.62,
+      "name": "Line 2",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 32,
+        "bold": true
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T5",
+      "xMm": 0.0,
+      "yMm": 19.0,
+      "wMm": 20.63,
+      "hMm": 5.0,
+      "name": "Line 3",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 27,
+        "bold": true
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T6",
+      "xMm": 0.0,
+      "yMm": 25.0,
+      "wMm": 16.08,
+      "hMm": 4.25,
+      "name": "Footer left",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 22,
+        "bold": false
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T7",
+      "xMm": 28.0,
+      "yMm": 26.0,
+      "wMm": 13.33,
+      "hMm": 3.62,
+      "name": "Footer center",
+      "type": "text",
+      "text": "Sample Text",
+      "font": {
+        "family": "Arial",
+        "size": 18,
+        "bold": false
+      },
+      "align": "Left",
+      "fitWidth": true,
+      "maxLines": 1
+    },
+    {
+      "id": "T8",
+      "xMm": 54.0,
+      "yMm": 6.0,
+      "wMm": 10.25,
+      "hMm": 28.0,
+      "rotation": 90,
+      "type": "text",
+      "text": "Sample Textas das das da sd",
+      "font": {
+        "family": "Arial",
+        "size": 32,
+        "bold": false
+      },
+      "align": "Left",
+      "maxWidthMm": 28.0,
+      "maxHeightMm": 10.0,
+      "fitWidth": true,
+      "maxLines": 2
+    }
+  ]
+}
